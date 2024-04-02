@@ -108,6 +108,15 @@ private const val FragmentShader =
         }
     """
 
+@Language("GLSL")
+private const val VertexShader = """
+        attribute vec4 position;
+        
+        void main() {
+            gl_Position = position;
+        }
+        """
+
 
 class GaussianBlur(
     private val targetView: View
@@ -142,8 +151,7 @@ class GaussianBlur(
 
     fun create(
         vertexBuffer: FloatBuffer,
-        indicesBuffer: ShortBuffer,
-        mVertexShaderCode: String
+        indicesBuffer: ShortBuffer
     ) {
         this.vertexBuffer = vertexBuffer
         this.indicesBuffer = indicesBuffer
@@ -151,7 +159,7 @@ class GaussianBlur(
         horizontalProgram = glCreateProgram()
         glAttachShader(
             horizontalProgram,
-            OpenGLUtils.loadShader(GL_VERTEX_SHADER, mVertexShaderCode)
+            OpenGLUtils.loadShader(GL_VERTEX_SHADER, VertexShader)
         )
         glAttachShader(
             horizontalProgram,
@@ -188,7 +196,7 @@ class GaussianBlur(
 
     fun draw() {
         drawBitmap()
-        horizontal()
+        drawBlur()
     }
 
     private fun deleteFBO() {
@@ -198,7 +206,7 @@ class GaussianBlur(
         horizontalDepthBuffer?.let { glDeleteRenderbuffers(1, it, 0) }
     }
 
-    private fun horizontal() {
+    private fun drawBlur() {
         // bind to the default frame buffer
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
         // use the fragment shader of the blur

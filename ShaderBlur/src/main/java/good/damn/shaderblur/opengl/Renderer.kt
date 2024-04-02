@@ -28,12 +28,6 @@ class Renderer(targetView: View) : GLSurfaceView.Renderer {
         1.0f, 1.0f,   // top right
     )
 
-    private val mVertexShaderCode =
-        "attribute vec4 position;" +
-                "void main() {" +
-                "gl_Position = position;" +
-                "}"
-
     private var mWidth = 1f
     private var mHeight = 1f
 
@@ -58,8 +52,7 @@ class Renderer(targetView: View) : GLSurfaceView.Renderer {
 
         mBlurEffect.create(
             mVertexBuffer,
-            mIndicesBuffer,
-            mVertexShaderCode
+            mIndicesBuffer
         )
     }
 
