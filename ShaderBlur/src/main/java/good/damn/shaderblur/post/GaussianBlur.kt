@@ -3,14 +3,17 @@ package good.damn.shaderblur.post
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.opengl.GLES20.GL_CLAMP_TO_EDGE
+import android.opengl.GLES20.GL_COLOR_ATTACHMENT0
 import android.opengl.GLES20.GL_COLOR_BUFFER_BIT
+import android.opengl.GLES20.GL_DEPTH_ATTACHMENT
 import android.opengl.GLES20.GL_DEPTH_BUFFER_BIT
 import android.opengl.GLES20.GL_FLOAT
 import android.opengl.GLES20.GL_FRAGMENT_SHADER
 import android.opengl.GLES20.GL_FRAMEBUFFER
+import android.opengl.GLES20.GL_FRAMEBUFFER_COMPLETE
 import android.opengl.GLES20.GL_LINEAR
+import android.opengl.GLES20.GL_RENDERBUFFER
 import android.opengl.GLES20.GL_RGBA
-import android.opengl.GLES20.GL_TEXTURE0
 import android.opengl.GLES20.GL_TEXTURE_2D
 import android.opengl.GLES20.GL_TEXTURE_MAG_FILTER
 import android.opengl.GLES20.GL_TEXTURE_MIN_FILTER
@@ -22,8 +25,8 @@ import android.opengl.GLES20.GL_UNSIGNED_SHORT
 import android.opengl.GLES20.GL_VERTEX_SHADER
 import android.opengl.GLES20.glActiveTexture
 import android.opengl.GLES20.glAttachShader
-import android.opengl.GLES20.glBindFramebuffer
 import android.opengl.GLES20.glBindTexture
+import android.opengl.GLES20.glCheckFramebufferStatus
 import android.opengl.GLES20.glClear
 import android.opengl.GLES20.glClearColor
 import android.opengl.GLES20.glCreateProgram
@@ -34,6 +37,8 @@ import android.opengl.GLES20.glDeleteTextures
 import android.opengl.GLES20.glDisableVertexAttribArray
 import android.opengl.GLES20.glDrawElements
 import android.opengl.GLES20.glEnableVertexAttribArray
+import android.opengl.GLES20.glFramebufferRenderbuffer
+import android.opengl.GLES20.glFramebufferTexture2D
 import android.opengl.GLES20.glGenFramebuffers
 import android.opengl.GLES20.glGenRenderbuffers
 import android.opengl.GLES20.glGenTextures
@@ -43,12 +48,13 @@ import android.opengl.GLES20.glGetUniformLocation
 import android.opengl.GLES20.glLinkProgram
 import android.opengl.GLES20.glTexImage2D
 import android.opengl.GLES20.glTexParameteri
+import android.opengl.GLES20.glUniform1f
 import android.opengl.GLES20.glUniform1i
 import android.opengl.GLES20.glUniform2f
 import android.opengl.GLES20.glUseProgram
 import android.opengl.GLES20.glVertexAttribPointer
 import android.opengl.GLES20.glViewport
-import android.opengl.GLUtils
+import android.opengl.GLUtils.texImage2D
 import android.view.View
 import good.damn.shaderblur.opengl.OpenGLUtils
 import org.intellij.lang.annotations.Language
@@ -64,7 +70,8 @@ private const val FragmentShader =
 
         uniform sampler2D input_texture;
         uniform vec2 texture_resolution;
-        const float radius = 100.0;
+        uniform float resFactor;
+        const float radius = 7.0;
         
         void main() {
             
@@ -123,7 +130,7 @@ class GaussianBlur(
 ) {
     private var texture: IntArray? = null
 
-    private var scaleFactor = 0.2f
+    private var scaleFactor = 0.1f
         set(value) {
             field = value
             scaledWidth = width * scaleFactor
@@ -140,13 +147,13 @@ class GaussianBlur(
     private lateinit var indicesBuffer: ShortBuffer
 
     private var verticalProgram = 0
-    private var horizontalProgram = 0
+    private var nativeProgram = 0
 
     private val canvas = Canvas()
 
     private var inputBitmap: Bitmap? = null
 
-    private var horizontalDepthBuffer: IntArray? = null
+    private var depthBuffer: IntArray? = null
     private var frameBuffer: IntArray? = null
 
     fun create(
@@ -156,16 +163,16 @@ class GaussianBlur(
         this.vertexBuffer = vertexBuffer
         this.indicesBuffer = indicesBuffer
 
-        horizontalProgram = glCreateProgram()
+        nativeProgram = glCreateProgram()
         glAttachShader(
-            horizontalProgram,
+            nativeProgram,
             OpenGLUtils.loadShader(GL_VERTEX_SHADER, VertexShader)
         )
         glAttachShader(
-            horizontalProgram,
+            nativeProgram,
             OpenGLUtils.loadShader(GL_FRAGMENT_SHADER, FragmentShader)
         )
-        glLinkProgram(horizontalProgram)
+        glLinkProgram(nativeProgram)
     }
 
     fun layout(
@@ -181,16 +188,16 @@ class GaussianBlur(
         inputBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         texture = intArrayOf(1)
         frameBuffer = intArrayOf(1)
-        horizontalDepthBuffer = intArrayOf(1)
+        depthBuffer = intArrayOf(1)
         glGenFramebuffers(1, frameBuffer, 0)
-        glGenRenderbuffers(1, horizontalDepthBuffer, 0)
+        glGenRenderbuffers(1, depthBuffer, 0)
 
         configTexture(texture)
     }
 
     fun clean() {
         if (verticalProgram != 0) glDeleteProgram(verticalProgram)
-        if (horizontalProgram != 0) glDeleteProgram(horizontalProgram)
+        if (nativeProgram != 0) glDeleteProgram(nativeProgram)
         deleteFBO()
     }
 
@@ -203,35 +210,37 @@ class GaussianBlur(
         inputBitmap?.let { if (!it.isRecycled) it.recycle() }
         frameBuffer?.let { glDeleteFramebuffers(1, it, 0) }
         texture?.let { glDeleteTextures(1, it, 0) }
-        horizontalDepthBuffer?.let { glDeleteRenderbuffers(1, it, 0) }
+        depthBuffer?.let { glDeleteRenderbuffers(1, it, 0) }
     }
 
     private fun drawBlur() {
-        // bind to the default frame buffer
-        glBindFramebuffer(GL_FRAMEBUFFER, 0)
-        // use the fragment shader of the blur
-        glUseProgram(horizontalProgram)
+        glUseProgram(nativeProgram)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture!![0], 0)
+        glFramebufferRenderbuffer(
+            GL_FRAMEBUFFER,
+            GL_DEPTH_ATTACHMENT,
+            GL_RENDERBUFFER,
+            depthBuffer!![0]
+        )
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return
+        glActiveTexture(texture!![0])
+        glBindTexture(GL_TEXTURE_2D, texture!![0])
+        texImage2D(GL_TEXTURE_2D, 0, inputBitmap, 0)
+        // bind the texture and generate the mipmap
+        glGenerateMipmap(GL_TEXTURE_2D)
         // set the view port to the full width and height of the view
         glViewport(0, 0, width.toInt(), height.toInt())
         // transparent clear color
         glClearColor(0f, 0f, 0f, 0f)
         glClear(GL_DEPTH_BUFFER_BIT or GL_COLOR_BUFFER_BIT)
         // handle positioning
-        val positionHandle = glGetAttribLocation(horizontalProgram, "position")
+        val positionHandle = glGetAttribLocation(nativeProgram, "position")
         glEnableVertexAttribArray(positionHandle)
         glVertexAttribPointer(positionHandle, 2, GL_FLOAT, false, 8, vertexBuffer)
-
-        GLUtils.texImage2D(GL_TEXTURE_2D, 0, inputBitmap, 0)
-        // bind the texture and generate the mipmap
-        glBindTexture(GL_TEXTURE_2D, texture!![0])
-        glGenerateMipmap(GL_TEXTURE_2D)
-        glActiveTexture(GL_TEXTURE0)
-
         // set the uniforms
-        glUniform1i(glGetUniformLocation(horizontalProgram, "input_texture"), 0)
-        // glUniform1f(glGetUniformLocation(verticalProgram, "resFactor"), scaleFactor)
-        // glUniform2f(glGetUniformLocation(horizontalProgram, "u_res"), scaledWidth, scaledHeight)
-        glUniform2f(glGetUniformLocation(horizontalProgram, "texture_resolution"), width, height)
+        glUniform1i(glGetUniformLocation(nativeProgram, "input_texture"), 0)
+        glUniform1f(glGetUniformLocation(verticalProgram, "resFactor"), scaleFactor)
+        glUniform2f(glGetUniformLocation(nativeProgram, "texture_resolution"), width, height)
         glDrawElements(GL_TRIANGLES, indicesBuffer.capacity(), GL_UNSIGNED_SHORT, indicesBuffer)
         glDisableVertexAttribArray(positionHandle)
     }
@@ -257,8 +266,12 @@ class GaussianBlur(
 
     private fun drawBitmap() {
         try {
+            val rawOffset = -targetView.scrollY.toFloat()
             canvas.setBitmap(inputBitmap)
-            canvas.translate(0f, -targetView.scrollY.toFloat())
+            canvas.translate(
+                0f,
+                rawOffset.coerceAtMost(0f)
+            )
             targetView.draw(canvas)
         } catch (_: Exception) {
         }
